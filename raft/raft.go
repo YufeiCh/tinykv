@@ -195,6 +195,8 @@ func newRaft(c *Config) *Raft {
 		raftNode.Prs[prs] = &Progress{0, 0}
 	}
 
+	raftNode.becomeFollower(0, None)
+
 	return raftNode
 }
 
@@ -261,15 +263,11 @@ func (r *Raft) tick() {
 	case StateCandidate:
 		r.electionElapsed++
 		if r.electionElapsed >= r.randomElectionTimeOut {
-			r.Term++
-			r.electionElapsed = 0
 			r.startElection()
 		}
 	case StateFollower:
 		r.electionElapsed++
 		if r.electionElapsed >= r.randomElectionTimeOut {
-			r.electionElapsed = 0
-			r.becomeCandidate()
 			r.startElection()
 		}
 	}
@@ -289,6 +287,12 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 func (r *Raft) becomeCandidate() {
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
+	r.Term++
+	r.votes = make(map[uint64]bool)
+	r.voteCount = 1
+	r.votes[r.id] = true
+	r.Vote = r.id
+	r.randomElectionTimeOut = r.electionTimeout + rand.Intn(r.electionTimeout)
 	r.State = StateCandidate
 }
 
@@ -326,16 +330,7 @@ func (r *Raft) Step(m pb.Message) error {
 }
 
 func (r *Raft) startElection() {
-	r.votes = make(map[uint64]bool)
-	r.Vote = None
-	r.voteCount = 0
-	r.votes[r.id] = true
-	r.Vote = r.id
-	r.voteCount++
-	r.heartbeatElapsed = 0
-	r.randomElectionTimeOut = r.electionTimeout + rand.Intn(r.electionTimeout)
-	r.Term++
-
+	r.becomeCandidate()
 	if r.voteCount > uint64(len(r.Prs)/2) {
 		r.becomeLeader()
 		return
@@ -349,7 +344,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.Term < r.Term {
 		r.sendAppendResponse(m.From, None, None, true)
 	}
-	if m.Term > r.Term {
+	if m.Term >= r.Term {
 		r.becomeFollower(m.Term, m.From)
 	}
 }
@@ -461,7 +456,6 @@ func (r *Raft) stepFollower(m pb.Message) {
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHup:
-		r.becomeCandidate()
 		r.startElection()
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m)
