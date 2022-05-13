@@ -50,13 +50,19 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	lastindex uint64
+	FirstIndex uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
-	return &RaftLog{storage, None, None, None, make([]pb.Entry, 0), nil, 0}
+	raftLog := &RaftLog{storage, None, None, None, make([]pb.Entry, 0), nil, None}
+	firstIndex, _ := storage.FirstIndex()
+	lastIndex, _ := storage.LastIndex()
+	raftLog.entries, _ = storage.Entries(firstIndex, lastIndex+1)
+	raftLog.FirstIndex = firstIndex
+	raftLog.stabled = lastIndex
+	return raftLog
 }
 
 // We need to compact the log entries in some point of time like
@@ -68,14 +74,20 @@ func (l *RaftLog) maybeCompact() {
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
-	// Your Code Here (2A).
-	return nil
+	if len(l.entries) == 0 {
+		return nil
+	}
+	return l.entries[l.stabled-l.FirstIndex+1:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
-	// Your Code Here (2A).
-	return nil
+	if l.committed == l.applied {
+		return nil
+	}
+	commitIndex := l.committed - l.FirstIndex
+	ents = append(ents, l.entries[l.applied:commitIndex+1]...)
+	return
 }
 
 // LastIndex return the last index of the log entries
@@ -92,8 +104,21 @@ func (l *RaftLog) LastIndex() uint64 {
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	if len(l.entries) > 0 {
-		return l.entries[i-l.entries[0].Index].Term, nil
+	if len(l.entries) > 0 && i >= l.FirstIndex {
+		return l.entries[i-l.FirstIndex].Term, nil
 	}
 	return l.storage.Term(i)
+}
+
+func (l *RaftLog) getPeerIndex(i uint64) uint64 {
+	index := i - l.FirstIndex
+	if index < 0 {
+		panic("getPeerIndex < 0")
+	}
+
+	return index
+}
+
+func (l *RaftLog) getIndexFromEntryNum(i int) int {
+	return i + int(l.FirstIndex)
 }
