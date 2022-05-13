@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"reflect"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -70,12 +71,18 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	prevSoftState *SoftState
+	prevHardState pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	raft := newRaft(config)
+	rawNode := &RawNode{Raft: raft}
+	rawNode.prevHardState = raft.getHardState()
+	rawNode.prevSoftState = raft.getSoftState()
+	return rawNode, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,12 +150,30 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	ready := &Ready{
+		Entries:          rn.Raft.RaftLog.unstableEntries(),
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+		Messages:         rn.Raft.msgs,
+	}
+	hardState := rn.Raft.getHardState()
+	softState := rn.Raft.getSoftState()
+	if !reflect.DeepEqual(hardState, rn.prevHardState) {
+		ready.HardState = hardState
+	}
+	if !reflect.DeepEqual(softState, rn.prevSoftState) {
+		ready.SoftState = softState
+		rn.prevSoftState = softState
+	}
+	rn.Raft.msgs = make([]pb.Message, 0)
+	return *ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	if rn.Raft.RaftLog.committed > rn.Raft.RaftLog.applied {
+		return true
+	}
 	return false
 }
 
@@ -156,6 +181,15 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if len(rd.Entries) > 0 {
+		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
+	}
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
+	if !reflect.DeepEqual(rd.HardState, rn.prevHardState) {
+		rn.prevHardState = rd.HardState
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this

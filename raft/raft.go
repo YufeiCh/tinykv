@@ -178,7 +178,7 @@ func newRaft(c *Config) *Raft {
 		Prs:                   make(map[uint64]*Progress),
 		votes:                 make(map[uint64]bool),
 		voteCount:             0,
-		msgs:                  make([]pb.Message, 0),
+		msgs:                  nil,
 		electionTimeout:       c.ElectionTick,
 		heartbeatTimeout:      c.HeartbeatTick,
 		randomElectionTimeOut: c.ElectionTick,
@@ -195,6 +195,21 @@ func newRaft(c *Config) *Raft {
 	raftNode.RaftLog.applied = c.Applied
 
 	return raftNode
+}
+
+func (r *Raft) getSoftState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
+
+func (r *Raft) getHardState() pb.HardState {
+	return pb.HardState{
+		Commit: r.RaftLog.committed,
+		Term:   r.Term,
+		Vote:   r.Vote,
+	}
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
