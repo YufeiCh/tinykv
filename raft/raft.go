@@ -212,6 +212,14 @@ func (r *Raft) getHardState() pb.HardState {
 	}
 }
 
+func (r *Raft) isSameSoftState(a *SoftState, b *SoftState) bool {
+	return a.Lead == b.Lead && a.RaftState == b.RaftState
+}
+
+func (r *Raft) isSameHardState(a *pb.HardState, b *pb.HardState) bool {
+	return a.Term == b.Term && a.Commit == b.Commit && a.Vote == b.Vote
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {

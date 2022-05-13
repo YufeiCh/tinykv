@@ -157,10 +157,10 @@ func (rn *RawNode) Ready() Ready {
 	}
 	hardState := rn.Raft.getHardState()
 	softState := rn.Raft.getSoftState()
-	if !reflect.DeepEqual(hardState, rn.prevHardState) {
+	if !rn.Raft.isSameHardState(&hardState, &rn.prevHardState) {
 		ready.HardState = hardState
 	}
-	if !reflect.DeepEqual(softState, rn.prevSoftState) {
+	if !rn.Raft.isSameSoftState(softState, rn.prevSoftState) {
 		ready.SoftState = softState
 		rn.prevSoftState = softState
 	}
