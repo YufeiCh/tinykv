@@ -186,13 +186,23 @@ func newRaft(c *Config) *Raft {
 		PendingConfIndex:      None,
 	}
 	raftNode.becomeFollower(0, None)
-	for _, prs := range c.peers {
-		raftNode.Prs[prs] = &Progress{0, 0}
-	}
-
-	hardState, _, _ := c.Storage.InitialState()
+	hardState, confState, _ := c.Storage.InitialState()
 	raftNode.Vote, raftNode.Term, raftNode.RaftLog.committed = hardState.Vote, hardState.Term, hardState.Commit
 	raftNode.RaftLog.applied = c.Applied
+	if c.peers == nil {
+		c.peers = confState.Nodes
+	}
+
+	lastIndex := raftNode.RaftLog.LastIndex()
+	firstIndex, _ := raftNode.RaftLog.storage.FirstIndex()
+	for _, prs := range c.peers {
+		if prs == raftNode.id {
+			raftNode.Prs[prs] = &Progress{Match: lastIndex, Next: lastIndex + 1}
+		} else {
+			raftNode.Prs[prs] = &Progress{Match: firstIndex - 1, Next: lastIndex + 1}
+		}
+
+	}
 
 	return raftNode
 }
