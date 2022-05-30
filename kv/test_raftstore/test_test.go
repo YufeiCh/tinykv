@@ -205,7 +205,6 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			last := ""
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
-					log.Infof(": client new scan put\n")
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Infof("%d: client new put %v,%v\n", cli, key, value)
@@ -219,7 +218,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
-						// log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
+						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
 					}
 				}
 			}

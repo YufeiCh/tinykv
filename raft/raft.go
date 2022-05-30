@@ -334,6 +334,7 @@ func (r *Raft) tick() {
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
+	// log.Infof("become follower: %d, %d", r.id, lead)
 	r.Term = term
 	r.Lead = lead
 	r.heartbeatElapsed = 0
@@ -344,6 +345,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
+	// log.Infof("become candidate: %d", r.id)
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
 	r.Term++
@@ -359,6 +361,7 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	// log.Infof("become leader: %d", r.id)
 	r.Lead = r.id
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
@@ -415,7 +418,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		r.sendAppendResponse(m.From, None, None, true)
 		return
 	}
-	r.becomeFollower(m.Term, m.From)
 	if m.Index > r.RaftLog.LastIndex() {
 		r.sendAppendResponse(m.From, None, r.RaftLog.LastIndex()+1, true)
 		return
@@ -464,7 +466,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		r.sendHeartBeatResponse(m.From, true)
 		return
 	}
-	r.becomeFollower(m.Term, m.From)
+	// r.becomeFollower(m.Term, m.From)
 	r.electionElapsed = 0
 	r.randomElectionTimeOut = r.electionTimeout + rand.Intn(r.electionTimeout)
 	r.sendHeartBeatResponse(m.From, false)
@@ -488,6 +490,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	if r.voteCount > uint64(len(r.Prs)/2) && !r.IsLeader() {
 		r.becomeLeader()
 	} else if len(r.votes)-int(r.voteCount) > len(r.Prs)/2 {
+		// log.Infof("request vote")
 		r.becomeFollower(r.Term, None)
 	}
 }

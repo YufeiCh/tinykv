@@ -332,7 +332,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	prevlast, _ := ps.LastIndex()
 	if prevlast > lastIndex {
 		for i := lastIndex + 1; i <= prevlast; i++ {
-			raftWB.DeleteMeta(meta.RaftLogKey(regionId, entries[i].Index))
+			raftWB.DeleteMeta(meta.RaftLogKey(regionId, i))
 		}
 	}
 	ps.raftState.LastIndex = lastIndex
@@ -364,8 +364,8 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	ps.Append(ready.Entries, raftWB)
 	if !raft.IsEmptyHardState(ready.HardState) {
 		ps.raftState.HardState = &ready.HardState
-		raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), &ready.HardState)
 	}
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
 	raftWB.WriteToDB(ps.Engines.Raft)
 	return nil, nil
 }

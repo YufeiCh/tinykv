@@ -53,7 +53,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		d.Send(d.ctx.trans, rd.Messages)
 		if len(rd.CommittedEntries) > 0 {
 			kvWB := new(engine_util.WriteBatch)
-			for _, entry := range rd.Entries {
+			for _, entry := range rd.CommittedEntries {
 				kvWB = d.process(&entry, kvWB)
 			}
 			d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
@@ -65,6 +65,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
+	// log.Infof("handleMag [region: %d] lead: %d term: %d msg: %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg)
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
@@ -90,9 +91,19 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	}
 }
 
-func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) *engine_util.WriteBatch {
+func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
 	m := &raft_cmdpb.Request{}
 	m.Unmarshal(entry.Data)
+
+	switch m.CmdType {
+	case raft_cmdpb.CmdType_Get:
+	case raft_cmdpb.CmdType_Delete:
+		req := m.GetDelete()
+		wb.DeleteCF(req.GetCf(), req.GetKey())
+	case raft_cmdpb.CmdType_Put:
+		req := m.GetPut()
+		wb.SetCF(req.GetCf(), req.GetKey(), req.GetValue())
+	}
 
 	if len(d.proposals) > 0 {
 		p := d.proposals[0]
@@ -104,24 +115,26 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 				switch m.CmdType {
 				case raft_cmdpb.CmdType_Get:
 					d.peerStorage.applyState.AppliedIndex = entry.Index
-					kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-					kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+					wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+					wb.WriteToDB(d.peerStorage.Engines.Kv)
 					req := m.GetGet()
-					value, err := engine_util.GetCF(d.ctx.engine.Kv, req.GetCf(), req.GetKey())
+					value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.GetCf(), req.GetKey())
 					if err != nil {
 						value = nil
 					}
 					resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: value}}}
-					kvWB = new(engine_util.WriteBatch)
+					wb = new(engine_util.WriteBatch)
 				case raft_cmdpb.CmdType_Delete:
-					req := m.GetDelete()
-					kvWB.DeleteCF(req.GetCf(), req.GetKey())
 					resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{}}}
 				case raft_cmdpb.CmdType_Put:
-					req := m.GetPut()
-					kvWB.SetCF(req.GetCf(), req.GetKey(), req.GetValue())
 					resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{}}}
 				case raft_cmdpb.CmdType_Snap:
+					d.peerStorage.applyState.AppliedIndex = entry.Index
+					wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+					wb.WriteToDB(d.peerStorage.Engines.Kv)
+					resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
+					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+					wb = new(engine_util.WriteBatch)
 				}
 				p.cb.Done(resp)
 			}
@@ -129,7 +142,7 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 		}
 	}
 
-	return kvWB
+	return wb
 }
 
 func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) error {
