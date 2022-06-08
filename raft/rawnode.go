@@ -164,6 +164,10 @@ func (rn *RawNode) Ready() Ready {
 		ready.SoftState = softState
 		rn.prevSoftState = softState
 	}
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		ready.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+		rn.Raft.RaftLog.pendingSnapshot = nil
+	}
 	rn.Raft.msgs = make([]pb.Message, 0)
 	return *ready
 }
@@ -173,7 +177,7 @@ func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
 	if len(rn.Raft.RaftLog.unstableEntries()) > 0 ||
 		len(rn.Raft.RaftLog.nextEnts()) > 0 ||
-		len(rn.Raft.msgs) > 0 {
+		len(rn.Raft.msgs) > 0 || !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		return true
 	}
 	return false

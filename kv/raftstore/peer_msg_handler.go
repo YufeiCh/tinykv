@@ -91,17 +91,27 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	}
 }
 
-func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
-	m := &raft_cmdpb.Request{}
-	m.Unmarshal(entry.Data)
+func (d *peerMsgHandler) processAdminRequest(entry *eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		compactLogRequest := msg.AdminRequest.CompactLog
+		d.peerStorage.applyState.TruncatedState = &rspb.RaftTruncatedState{
+			Index: compactLogRequest.CompactIndex,
+			Term:  compactLogRequest.CompactTerm}
+		d.ScheduleCompactLog(compactLogRequest.CompactIndex)
+	}
+	return wb
+}
 
-	switch m.CmdType {
+func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	request := msg.Requests[0]
+	switch request.CmdType {
 	case raft_cmdpb.CmdType_Get:
 	case raft_cmdpb.CmdType_Delete:
-		req := m.GetDelete()
+		req := request.GetDelete()
 		wb.DeleteCF(req.GetCf(), req.GetKey())
 	case raft_cmdpb.CmdType_Put:
-		req := m.GetPut()
+		req := request.GetPut()
 		wb.SetCF(req.GetCf(), req.GetKey(), req.GetValue())
 	}
 
@@ -112,12 +122,12 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatc
 				p.cb.Done(ErrRespStaleCommand(entry.Term))
 			} else {
 				resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
-				switch m.CmdType {
+				switch request.CmdType {
 				case raft_cmdpb.CmdType_Get:
 					d.peerStorage.applyState.AppliedIndex = entry.Index
 					wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 					wb.WriteToDB(d.peerStorage.Engines.Kv)
-					req := m.GetGet()
+					req := request.GetGet()
 					value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.GetCf(), req.GetKey())
 					if err != nil {
 						value = nil
@@ -142,6 +152,22 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatc
 		}
 	}
 
+	return wb
+}
+
+func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	msg := &raft_cmdpb.RaftCmdRequest{}
+	err := msg.Unmarshal(entry.Data)
+	if err != nil {
+		panic(err)
+	}
+	if len(msg.Requests) > 0 {
+		wb = d.processRequest(entry, msg, wb)
+	}
+
+	if msg.AdminRequest != nil {
+		wb = d.processAdminRequest(entry, msg, wb)
+	}
 	return wb
 }
 
@@ -181,14 +207,19 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
-func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	err := d.preProposeRaftCommand(msg)
-	if err != nil {
-		cb.Done(ErrResp(err))
-		return
+func (d *peerMsgHandler) proposeAdminCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		data, err := msg.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		d.RaftGroup.Propose(data)
 	}
-	// Your Code Here (2B).
-	data, err := msg.Requests[0].Marshal()
+}
+
+func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	data, err := msg.Marshal()
 	if err != nil {
 		panic(err)
 	}
@@ -206,6 +237,22 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		d.proposals = d.proposals[:idx]
 	}
 	d.proposals = append(d.proposals, p)
+}
+
+func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	err := d.preProposeRaftCommand(msg)
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	// Your Code Here (2B).
+	if msg.AdminRequest != nil {
+		d.proposeAdminCommand(msg, cb)
+	}
+
+	if msg.Requests != nil {
+		d.proposeNormalCommand(msg, cb)
+	}
 }
 
 func (d *peerMsgHandler) onTick() {

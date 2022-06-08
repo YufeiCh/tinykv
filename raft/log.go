@@ -62,6 +62,7 @@ func newLog(storage Storage) *RaftLog {
 	raftLog.entries, _ = storage.Entries(firstIndex, lastIndex+1)
 	raftLog.FirstIndex = firstIndex
 	raftLog.stabled = lastIndex
+	raftLog.applied = firstIndex - 1
 	return raftLog
 }
 
@@ -70,6 +71,15 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	firstIndex, _ := l.storage.FirstIndex()
+	if firstIndex > l.FirstIndex {
+		if len(l.entries) > 0 {
+			newEntry := l.entries[l.getPeerIndex(firstIndex):]
+			l.entries = make([]pb.Entry, len(newEntry))
+			copy(l.entries, newEntry)
+		}
+		l.FirstIndex = firstIndex
+	}
 }
 
 // unstableEntries return all the unstable entries
@@ -90,6 +100,9 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
+	if !IsEmptySnap(l.pendingSnapshot) {
+		return l.pendingSnapshot.Metadata.Index
+	}
 	if len(l.entries) > 0 {
 		return l.entries[len(l.entries)-1].Index
 	}
@@ -105,7 +118,17 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if len(l.entries) > 0 && i >= l.FirstIndex {
 		return l.entries[i-l.FirstIndex].Term, nil
 	}
-	return l.storage.Term(i)
+	term, err := l.storage.Term(i)
+	if !IsEmptySnap(l.pendingSnapshot) && err == ErrUnavailable {
+		if i == l.pendingSnapshot.Metadata.Index {
+			return l.pendingSnapshot.Metadata.Term, nil
+		}
+		if i < l.pendingSnapshot.Metadata.Index {
+			return 0, ErrCompacted
+		}
+	}
+
+	return term, err
 }
 
 func (l *RaftLog) getPeerIndex(i uint64) uint64 {

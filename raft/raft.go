@@ -188,7 +188,9 @@ func newRaft(c *Config) *Raft {
 	raftNode.becomeFollower(0, None)
 	hardState, confState, _ := c.Storage.InitialState()
 	raftNode.Vote, raftNode.Term, raftNode.RaftLog.committed = hardState.Vote, hardState.Term, hardState.Commit
-	raftNode.RaftLog.applied = c.Applied
+	if c.Applied > 0 {
+		raftNode.RaftLog.applied = c.Applied
+	}
 	if c.peers == nil {
 		c.peers = confState.Nodes
 	}
@@ -237,7 +239,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 	prevIndex := r.Prs[to].Next - 1
 	LogTerm, err := r.RaftLog.Term(prevIndex)
 	if err != nil {
-		return false
+		if err == ErrCompacted {
+			r.sendSnapshot(to)
+			return false
+		}
+		panic(err)
 	}
 
 	entries := make([]*pb.Entry, 0)
@@ -456,6 +462,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.Commit > r.RaftLog.committed {
 		r.RaftLog.committed = min(m.Commit, m.Index+uint64(len(m.Entries)))
 	}
+	r.becomeFollower(m.Term, m.From)
 	r.sendAppendResponse(m.From, None, r.RaftLog.LastIndex(), false)
 }
 
@@ -475,6 +482,27 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	metaData := m.Snapshot.Metadata
+	if metaData.Index < r.RaftLog.committed {
+		r.sendAppendResponse(m.From, None, r.RaftLog.committed, true)
+		return
+	}
+	r.becomeFollower(max(metaData.Term, r.Term), m.From)
+	if len(r.RaftLog.entries) > 0 {
+		r.RaftLog.entries = nil
+	}
+	r.RaftLog.FirstIndex = metaData.Index + 1
+	r.RaftLog.committed = metaData.Index
+	r.RaftLog.applied = metaData.Index
+	r.RaftLog.stabled = metaData.Index
+	if metaData.ConfState.Nodes != nil {
+		r.Prs = make(map[uint64]*Progress)
+		for _, pr := range metaData.ConfState.Nodes {
+			r.Prs[pr] = &Progress{}
+		}
+	}
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.sendAppendResponse(m.From, None, r.RaftLog.committed, false)
 }
 
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
@@ -622,6 +650,16 @@ func (r *Raft) broadcastAppendEntries() {
 	}
 }
 
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot, _ := r.RaftLog.storage.Snapshot()
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		Snapshot: &snapshot,
+		To:       to,
+		From:     r.id,
+	})
+}
+
 func (r *Raft) appendEntries(m pb.Message) {
 	lastIndex := r.RaftLog.LastIndex()
 	for i, entry := range m.Entries {
@@ -629,7 +667,6 @@ func (r *Raft) appendEntries(m pb.Message) {
 		entry.Index = lastIndex + uint64(i) + 1
 		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 	}
-
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	r.broadcastAppendEntries()
@@ -649,8 +686,9 @@ func (r *Raft) stepFollower(m pb.Message) {
 		r.startElection()
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
-	return
 }
 
 // -----------------candidate functions --------------
@@ -666,6 +704,7 @@ func (r *Raft) stepCandidate(m pb.Message) {
 		r.startElection()
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
-	return
 }
