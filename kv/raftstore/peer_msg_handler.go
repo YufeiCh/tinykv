@@ -155,7 +155,25 @@ func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.Ra
 	return wb
 }
 
+func (d *peerMsgHandler) processConfChange(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	cc := eraftpb.ConfChange{}
+	err := cc.Unmarshal(entry.Data)
+	if err != nil {
+		panic(err)
+	}
+	switch cc.ChangeType {
+	case eraftpb.ConfChangeType_AddNode:
+
+	case eraftpb.ConfChangeType_RemoveNode:
+	}
+	return wb
+}
+
 func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+		wb = d.processConfChange(entry, wb)
+		return wb
+	}
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	err := msg.Unmarshal(entry.Data)
 	if err != nil {

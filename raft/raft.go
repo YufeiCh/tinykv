@@ -393,6 +393,9 @@ func (r *Raft) becomeLeader() {
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
+	if _, ok := r.Prs[r.id]; !ok {
+		return ErrStepPeerNotFound
+	}
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
 	}
@@ -552,28 +555,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 	r.msgs = append(r.msgs, *msg)
 }
 
-func (r *Raft) handleAppendResponse(m pb.Message) {
-	if m.Term < r.Term {
-		return
-	}
-
-	if m.Reject {
-		index := m.Index
-		if index == None {
-			return
-		}
-		if m.LogTerm != None {
-			index = uint64(r.RaftLog.getIndexFromEntryNum(sort.Search(len(r.RaftLog.entries),
-				func(i int) bool { return r.RaftLog.entries[i].Term == m.LogTerm })))
-		}
-		r.Prs[m.From].Next = index
-		r.sendAppend(m.From)
-		return
-	}
-
-	r.Prs[m.From].Match = m.Index
-	r.Prs[m.From].Next = m.Index + 1
-
+func (r *Raft) leaderCommit() {
 	match := make(uint64Slice, len(r.Prs))
 	i := 0
 	for _, peer := range r.Prs {
@@ -595,14 +577,72 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	}
 }
 
+func (r *Raft) handleAppendResponse(m pb.Message) {
+	if m.Term < r.Term {
+		return
+	}
+
+	if m.Reject {
+		index := m.Index
+		if index == None {
+			return
+		}
+		if m.LogTerm != None {
+			index = uint64(r.RaftLog.getIndexFromEntryNum(sort.Search(len(r.RaftLog.entries),
+				func(i int) bool { return r.RaftLog.entries[i].Term == m.LogTerm })))
+		}
+		r.Prs[m.From].Next = index
+		r.sendAppend(m.From)
+		return
+	}
+
+	r.Prs[m.From].Match = m.Index
+	r.Prs[m.From].Next = m.Index + 1
+	r.leaderCommit()
+	if r.leadTransferee == m.From {
+		r.handleTransferLeader(m)
+	}
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	if _, ok := r.Prs[m.From]; !ok {
+		return
+	}
+	if !r.IsLeader() {
+		r.sendMessage(pb.MessageType_MsgTransferLeader, r.Lead)
+		return
+	}
+	if r.Prs[m.From].Next == r.Prs[r.id].Next && r.Prs[m.From].Match == r.Prs[r.id].Match {
+		r.leadTransferee = None
+		r.sendMessage(pb.MessageType_MsgTimeoutNow, m.From)
+		return
+	} else {
+		r.leadTransferee = m.From
+		r.sendAppend(m.From)
+	}
+}
+
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		lastIndex := r.RaftLog.LastIndex()
+		firstIndex, _ := r.RaftLog.storage.FirstIndex()
+		r.Prs[id] = &Progress{Match: firstIndex - 1, Next: lastIndex + 1}
+	}
+	r.PendingConfIndex = None
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+		if r.IsLeader() {
+			r.leaderCommit()
+		}
+	}
+	r.PendingConfIndex = None
 }
 
 func (r *Raft) IsLeader() bool {
@@ -638,8 +678,9 @@ func (r *Raft) stepLeader(m pb.Message) {
 		r.handleAppendResponse(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.sendAppend(m.From)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
 	}
-	return
 }
 
 func (r *Raft) broadcastAppendEntries() {
@@ -651,7 +692,10 @@ func (r *Raft) broadcastAppendEntries() {
 }
 
 func (r *Raft) sendSnapshot(to uint64) {
-	snapshot, _ := r.RaftLog.storage.Snapshot()
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return
+	}
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType:  pb.MessageType_MsgSnapshot,
 		Snapshot: &snapshot,
@@ -663,6 +707,13 @@ func (r *Raft) sendSnapshot(to uint64) {
 func (r *Raft) appendEntries(m pb.Message) {
 	lastIndex := r.RaftLog.LastIndex()
 	for i, entry := range m.Entries {
+		if entry.EntryType == pb.EntryType_EntryConfChange {
+			if r.PendingConfIndex == None {
+				r.PendingConfIndex = entry.Index
+			} else {
+				continue
+			}
+		}
 		entry.Term = r.Term
 		entry.Index = lastIndex + uint64(i) + 1
 		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
@@ -688,6 +739,10 @@ func (r *Raft) stepFollower(m pb.Message) {
 		r.handleRequestVote(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.startElection()
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
 	}
 }
 
@@ -706,5 +761,9 @@ func (r *Raft) stepCandidate(m pb.Message) {
 		r.handleRequestVote(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.startElection()
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
 	}
 }

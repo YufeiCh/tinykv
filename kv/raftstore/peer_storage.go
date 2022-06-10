@@ -362,13 +362,14 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 
 	ps.raftState.LastIndex = snapshot.Metadata.Index
 	ps.raftState.LastTerm = snapshot.Metadata.Term
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
 	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
 	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
 	ps.snapState.StateType = snap.SnapState_Applying
-	kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState)
+	kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.Id), ps.applyState)
 
 	ch := make(chan bool, 1)
-	ps.regionSched <- runner.RegionTaskApply{
+	ps.regionSched <- &runner.RegionTaskApply{
 		RegionId: snapData.Region.Id,
 		Notifier: ch,
 		SnapMeta: snapshot.Metadata,
@@ -376,7 +377,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		EndKey:   snapData.GetRegion().EndKey,
 	}
 	<-ch
-	applySnapResult := &ApplySnapResult{PrevRegion: snapData.Region, Region: ps.Region()}
+	applySnapResult := &ApplySnapResult{PrevRegion: ps.Region(), Region: snapData.Region}
 	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
 	return applySnapResult, nil
 }

@@ -196,6 +196,7 @@ func (rn *RawNode) Advance(rd Ready) {
 	if !reflect.DeepEqual(rd.HardState, rn.prevHardState) {
 		rn.prevHardState = rd.HardState
 	}
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this
