@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"time"
 
@@ -49,12 +50,25 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	// Your Code Here (2B).
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-		d.peerStorage.SaveReadyState(&rd)
+		result, _ := d.peerStorage.SaveReadyState(&rd)
+		if result != nil {
+			if !reflect.DeepEqual(result.PrevRegion, result.Region) {
+				d.peerStorage.SetRegion(result.Region)
+				storeMeta := d.ctx.storeMeta
+				storeMeta.Lock()
+				storeMeta.regions[result.Region.Id] = result.Region
+				storeMeta.regionRanges.ReplaceOrInsert(&regionItem{result.Region})
+				storeMeta.Unlock()
+			}
+		}
 		d.Send(d.ctx.trans, rd.Messages)
 		if len(rd.CommittedEntries) > 0 {
 			kvWB := new(engine_util.WriteBatch)
 			for _, entry := range rd.CommittedEntries {
 				kvWB = d.process(&entry, kvWB)
+				if d.stopped {
+					return
+				}
 			}
 			d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
 			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
@@ -65,7 +79,13 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
-	// log.Infof("handleMag [region: %d] lead: %d term: %d msg: %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg)
+	// if msg.Type == message.MsgTypeRaftCmd {
+	// 	log.Infof("handleMag [region: %d] lead: %d term: %d msg: %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg.Data.(*message.MsgRaftCmd))
+	// } else if msg.Type == message.MsgTypeTick {
+
+	// } else {
+	// 	log.Infof("handleMag [region: %d] lead: %d term: %d msg: %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg)
+	// }
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
@@ -95,10 +115,13 @@ func (d *peerMsgHandler) processAdminRequest(entry *eraftpb.Entry, msg *raft_cmd
 	switch msg.AdminRequest.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		compactLogRequest := msg.AdminRequest.CompactLog
-		d.peerStorage.applyState.TruncatedState = &rspb.RaftTruncatedState{
-			Index: compactLogRequest.CompactIndex,
-			Term:  compactLogRequest.CompactTerm}
-		d.ScheduleCompactLog(compactLogRequest.CompactIndex)
+		if compactLogRequest.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
+			d.peerStorage.applyState.TruncatedState = &rspb.RaftTruncatedState{
+				Index: compactLogRequest.CompactIndex,
+				Term:  compactLogRequest.CompactTerm}
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			d.ScheduleCompactLog(compactLogRequest.CompactIndex)
+		}
 	}
 	return wb
 }
@@ -155,23 +178,91 @@ func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.Ra
 	return wb
 }
 
-func (d *peerMsgHandler) processConfChange(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
-	cc := eraftpb.ConfChange{}
+func (d *peerMsgHandler) processConfChange(entry *eraftpb.Entry, wb *engine_util.WriteBatch) {
+	cc := &eraftpb.ConfChange{}
 	err := cc.Unmarshal(entry.Data)
 	if err != nil {
 		panic(err)
 	}
+	msg := &raft_cmdpb.RaftCmdRequest{}
+	err = msg.Unmarshal(cc.Context)
+	if err != nil {
+		panic(err)
+	}
+	log.Infof("process conf change id:%v %v ", d.Tag, msg)
+	changePeer := msg.AdminRequest.ChangePeer.Peer
+	region := d.Region()
+	err = util.CheckRegionEpoch(msg, region, true)
+	if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
+		if len(d.proposals) > 0 {
+			p := d.proposals[0]
+			if p.index == entry.Index {
+				if p.term != entry.Term {
+					p.cb.Done(ErrRespStaleCommand(entry.Term))
+				} else {
+					p.cb.Done(ErrResp(errEpochNotMatching))
+				}
+				d.proposals = d.proposals[1:]
+			}
+		}
+	}
 	switch cc.ChangeType {
 	case eraftpb.ConfChangeType_AddNode:
-
+		index := searchRegionPeer(region, *changePeer)
+		if index == len(region.Peers) {
+			region.Peers = append(region.Peers, changePeer)
+			region.RegionEpoch.ConfVer += 1
+			meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			storeMeta.regions[region.Id] = region
+			storeMeta.Unlock()
+			d.insertPeerCache(changePeer)
+		}
 	case eraftpb.ConfChangeType_RemoveNode:
+		if cc.NodeId == d.Meta.Id {
+			d.destroyPeer()
+			return
+		}
+		index := searchRegionPeer(region, *changePeer)
+		if index < len(region.Peers) {
+			region.Peers = append(region.Peers[:index], region.Peers[index+1:]...)
+			region.RegionEpoch.ConfVer += 1
+			meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			storeMeta.regions[region.Id] = region
+			storeMeta.Unlock()
+			d.removePeerCache(changePeer.Id)
+		}
+
 	}
-	return wb
+	d.RaftGroup.ApplyConfChange(*cc)
+	if len(d.proposals) > 0 {
+		p := d.proposals[0]
+		if p.index == entry.Index {
+			if p.term != entry.Term {
+				p.cb.Done(ErrRespStaleCommand(entry.Term))
+			} else {
+				p.cb.Done(&raft_cmdpb.RaftCmdResponse{
+					Header: &raft_cmdpb.RaftResponseHeader{},
+					AdminResponse: &raft_cmdpb.AdminResponse{
+						CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+						ChangePeer: &raft_cmdpb.ChangePeerResponse{Region: region},
+					},
+				})
+			}
+			d.proposals = d.proposals[1:]
+		}
+	}
+	if d.IsLeader() {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+	}
 }
 
 func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
 	if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-		wb = d.processConfChange(entry, wb)
+		d.processConfChange(entry, wb)
 		return wb
 	}
 	msg := &raft_cmdpb.RaftCmdRequest{}
@@ -226,13 +317,33 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 }
 
 func (d *peerMsgHandler) proposeAdminCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	data, err := msg.Marshal()
+	if err != nil {
+		panic(err)
+	}
 	switch msg.AdminRequest.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
-		data, err := msg.Marshal()
-		if err != nil {
-			panic(err)
-		}
 		d.RaftGroup.Propose(data)
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		d.RaftGroup.TransferLeader(msg.AdminRequest.GetTransferLeader().GetPeer().Id)
+		resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
+		resp.AdminResponse = &raft_cmdpb.AdminResponse{CmdType: raft_cmdpb.AdminCmdType_TransferLeader,
+			TransferLeader: &raft_cmdpb.TransferLeaderResponse{}}
+		cb.Done(resp)
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		if d.RaftGroup.Raft.PendingConfIndex > d.peerStorage.AppliedIndex() {
+			return
+		}
+		cc := &eraftpb.ConfChange{}
+		cc.ChangeType = msg.AdminRequest.GetChangePeer().ChangeType
+		cc.NodeId = msg.AdminRequest.GetChangePeer().GetPeer().Id
+		cc.Context = data
+		proposal := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+		d.proposals = append(d.proposals, proposal)
+		err := d.RaftGroup.ProposeConfChange(*cc)
+		if err != nil {
+			panic("Config Change Failed")
+		}
 	}
 }
 
@@ -241,9 +352,9 @@ func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb
 	if err != nil {
 		panic(err)
 	}
+	p := &proposal{index: d.nextProposalIndex(), term: d.RaftGroup.Raft.Term, cb: cb}
 	d.RaftGroup.Propose(data)
 	index := d.peer.RaftGroup.Raft.RaftLog.LastIndex()
-	p := &proposal{index: index, term: d.RaftGroup.Raft.Term, cb: cb}
 	if len(d.proposals) > 0 {
 		n := len(d.proposals)
 		idx := sort.Search(len(d.proposals), func(i int) bool { return d.proposals[i].index >= index })
@@ -727,4 +838,13 @@ func newCompactLogRequest(regionID uint64, peer *metapb.Peer, compactIndex, comp
 		},
 	}
 	return req
+}
+
+func searchRegionPeer(region *metapb.Region, peer metapb.Peer) int {
+	for i, p := range region.Peers {
+		if p.Id == peer.Id && p.StoreId == peer.StoreId {
+			return i
+		}
+	}
+	return len(region.Peers)
 }

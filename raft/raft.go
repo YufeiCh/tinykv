@@ -194,6 +194,9 @@ func newRaft(c *Config) *Raft {
 	if c.peers == nil {
 		c.peers = confState.Nodes
 	}
+	if c.peers == nil {
+		c.peers = append(c.peers, c.ID)
+	}
 
 	lastIndex := raftNode.RaftLog.LastIndex()
 	firstIndex, _ := raftNode.RaftLog.storage.FirstIndex()
