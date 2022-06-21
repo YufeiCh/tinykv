@@ -82,7 +82,6 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	// if msg.Type == message.MsgTypeRaftCmd {
 	// 	log.Infof("handleMag [region: %d] lead: %d term: %d msg: %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg.Data.(*message.MsgRaftCmd))
 	// } else if msg.Type == message.MsgTypeTick {
-
 	// } else {
 	// 	log.Infof("handleMag [region: %d] lead: %d term: %d msg: %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg)
 	// }
@@ -543,11 +542,11 @@ func handleStaleMsg(trans Transport, msg *rspb.RaftMessage, curEpoch *metapb.Reg
 	regionID := msg.RegionId
 	fromPeer := msg.FromPeer
 	toPeer := msg.ToPeer
-	msgType := msg.Message.GetMsgType()
+	// msgType := msg.Message.GetMsgType()
 
 	if !needGC {
 		log.Infof("[region %d] raft message %s is stale, current %v ignore it",
-			regionID, msgType, curEpoch)
+			regionID, msg, curEpoch)
 		return
 	}
 	gcMsg := &rspb.RaftMessage{

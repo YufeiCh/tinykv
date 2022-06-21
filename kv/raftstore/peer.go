@@ -227,7 +227,7 @@ func (p *peer) Destroy(engine *engine_util.Engines, keepData bool) error {
 		NotifyReqRegionRemoved(region.Id, proposal.cb)
 	}
 	p.proposals = nil
-
+	p.RaftGroup.Raft.DPrintf("region :%v", region.Id)
 	log.Infof("%v destroy itself, takes %v", p.Tag, time.Now().Sub(start))
 	return nil
 }

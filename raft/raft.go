@@ -16,6 +16,8 @@ package raft
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"math/rand"
 	"sort"
 
@@ -453,7 +455,12 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		if lastIndex >= entry.Index {
 			logTerm, err := r.RaftLog.Term(entry.Index)
 			if err != nil {
-				panic("get log term error!")
+				if err == ErrCompacted {
+					r.sendAppendResponse(m.From, None, r.RaftLog.LastIndex(), false)
+					return
+				}
+				_, _ = r.RaftLog.Term(entry.Index)
+				panic("get log term error! ")
 			}
 			if logTerm != entry.Term {
 				index := r.RaftLog.getPeerIndex(entry.Index)
@@ -488,6 +495,9 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if r.RaftLog.pendingSnapshot != nil {
+		return
+	}
 	metaData := m.Snapshot.Metadata
 	if metaData.Index < r.RaftLog.committed {
 		r.sendAppendResponse(m.From, None, r.RaftLog.committed, true)
@@ -509,6 +519,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	}
 	r.RaftLog.pendingSnapshot = m.Snapshot
 	r.sendAppendResponse(m.From, None, r.RaftLog.committed, false)
+	log.Printf("send snapshot response :%v", r.RaftLog.committed)
 }
 
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
@@ -574,6 +585,7 @@ func (r *Raft) leaderCommit() {
 			panic("get log term failed!")
 		}
 		if r.Term == LogTerm {
+			r.DPrintf("leader commit")
 			r.RaftLog.committed = halfIndex
 			r.broadcastAppendEntries()
 		}
@@ -581,6 +593,7 @@ func (r *Raft) leaderCommit() {
 }
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
+	log.Printf("before handleAppendResponsetest: %v %v %v %v", m.From, m.To, r.Prs[m.From].Match, r.Prs[m.From].Next)
 	if m.Term < r.Term {
 		return
 	}
@@ -605,6 +618,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if r.leadTransferee == m.From {
 		r.handleTransferLeader(m)
 	}
+	log.Printf("after handleAppendResponsetest: %v %v %v %v", m.From, m.To, r.Prs[m.From].Match, r.Prs[m.From].Next)
 }
 
 func (r *Raft) handleTransferLeader(m pb.Message) {
@@ -629,9 +643,11 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
 	if _, ok := r.Prs[id]; !ok {
-		lastIndex := r.RaftLog.LastIndex()
-		firstIndex, _ := r.RaftLog.storage.FirstIndex()
-		r.Prs[id] = &Progress{Match: firstIndex - 1, Next: lastIndex + 1}
+		// lastIndex := r.RaftLog.LastIndex()
+		// firstIndex, _ := r.RaftLog.storage.FirstIndex()
+		r.Prs[id] = &Progress{Next: 1}
+		// log.Printf("add node last Index %v", r.Prs[id])
+		r.DPrintf("add node")
 	}
 	r.PendingConfIndex = None
 }
@@ -644,6 +660,7 @@ func (r *Raft) removeNode(id uint64) {
 		if r.IsLeader() {
 			r.leaderCommit()
 		}
+		r.DPrintf("remove node")
 	}
 	r.PendingConfIndex = None
 }
@@ -769,4 +786,23 @@ func (r *Raft) stepCandidate(m pb.Message) {
 	case pb.MessageType_MsgTransferLeader:
 		r.handleTransferLeader(m)
 	}
+}
+
+func (r *Raft) DPrintf(format string, a ...interface{}) (n int, err error) {
+	var state string
+	switch r.State {
+	case StateFollower:
+		state = "Follower"
+	case StateCandidate:
+		state = "Candidate"
+	case StateLeader:
+		state = "Leader"
+	default:
+		panic("Unknow state")
+	}
+	msg := fmt.Sprintf(format, a...)
+	first, _ := r.RaftLog.storage.FirstIndex()
+	log.Printf("Server %d (Term %d, State %s, Lead %d, Applied %d, Commited %d, First %d, stableFirst %d):\n%s",
+		r.id, r.Term, state, r.Lead, r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.FirstIndex, first, msg)
+	return
 }
