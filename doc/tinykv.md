@@ -78,4 +78,12 @@ createPeer方法创建新节点，并且注册到router.regions，并且该regio
 region分裂需要考虑脑裂的场景：应用快照时可能会与已有 region 的范围重叠，需要调用checkSnapshot进行检查。
 调用 ExceedEndKey 来比对end key。
 处理错误 `ErrRegionNotFound`,`ErrKeyNotInRegion`, `ErrEpochNotMatch`
-需要注意的是：propose 和 process 的时候都要检查当前的key还在不在 region 中，即使分裂了底层还是用的同一个store，所以分裂以后如果不检查 key 在不在 region 中的话，依旧可以获得 value，测试用例就无法通过。
+需要注意的是：propose 和 process 的时候都要检查当前的key还在不在 region 中，即使分裂了底层还是用的同一个store，所以分裂以后如果不检查 key 在不在 region 中的话，依旧可以获得 value，测试用例就无法通过。比如snap的时候，就没有key，因此根据key去检查checkKeyInRegion的时候，需要确认key不为nil，否则会导致snap的cmd没办法正常执行。
+
+
+region 调度器：
+调度器需要发送相应的 RegionHeartbeatRequest 给各个存储节点，根据返回的信息决定是否分裂，以及节点的变更。
+信息收集：当调度器收到一个心跳后，需要更新它的本地存储信息，然后会检查对于这个region是不是还有未尽的cmd，有的话就返回这个信息作为response。
+使用提供的方法跟着提示做就好。
+均衡调度：一开始会有一个初始化的 GetMinInterVal，如果返回的是空，就使用 GetNextInterval 去调大MInInterval。如果返回的是一个 operator，那么就会将这个operator 作为下一次获得相关 heartbeat 的 response 进行返回。
+这里需要注意判断所选region的副本要对于集群的最大副本，才做迁移。
