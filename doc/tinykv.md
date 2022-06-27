@@ -64,6 +64,12 @@ leader的迁移：
 当 `RemoveNode`时，需要直接调用 `destroyPeer` 来停止 raft 模块。
 及时更新 GlobalContext 中的 storeMeta
 考虑配置变更的幂等性
+实现过程中的问题：
+`TestConfChangeRecover3B`会出现get log term error，排查以后得到的原因：
+新启动的 peer 由于没有日志，所以在 leader 第一次发心跳的时候，会返回 index:0 给leader，然后 leader 处理这个 response 的时候就会发现该节点没有日志从而发送快照，新 peer 收到快照后进行应用并发送 response 给leader。但是 leader 不一定那么快收到这个 response，所以在收到之前再次向所有的follower发送日志的时候，还是会发现这个新peer没有日志，继续发送快照。这时新 peer收到了快照并应用，继续发送response。此时leader收到了第一个快照的 response，并修改关于这个新peer的下一条期望日志，然后向这个新 peer 发送按照第一个快照 response 应用后的日志点发送日志。因此，这个时候新peer就会收到自己的commit时间点前的日志，但是这些commit时间点前的日志已经被删掉了，显然是查不到对应的term，所以得到了上面的get log term error。
+解决：当查不到对应的term的时候，并且 storage 返回的错误为 ErrCompacted 的时候，不 append 日志直接发送response给leader反馈需要的最新日志点，这个点为目前所记录的commitIndex。
+解决方法安全的推论：commitIndex一定是获得整个集群认可的位置点，所以返回给leader不会影响一致性，不会出现垃圾日志。
+
 
 Region的分裂：
 通常不涉及数据的迁移，只涉及meta data的变更
@@ -72,3 +78,4 @@ createPeer方法创建新节点，并且注册到router.regions，并且该regio
 region分裂需要考虑脑裂的场景：应用快照时可能会与已有 region 的范围重叠，需要调用checkSnapshot进行检查。
 调用 ExceedEndKey 来比对end key。
 处理错误 `ErrRegionNotFound`,`ErrKeyNotInRegion`, `ErrEpochNotMatch`
+需要注意的是：propose 和 process 的时候都要检查当前的key还在不在 region 中，即使分裂了底层还是用的同一个store，所以分裂以后如果不检查 key 在不在 region 中的话，依旧可以获得 value，测试用例就无法通过。
