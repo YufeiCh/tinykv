@@ -523,7 +523,8 @@ func TestCommitConflictRollback4B(t *testing.T) {
 	})
 	resp := builder.runOneRequest(cmd).(*kvrpcpb.CommitResponse)
 
-	assert.NotNil(t, resp.Error)
+	// 这里不应该有error，找不到lock直接返回空response就好
+	assert.Nil(t, resp.Error)
 	assert.Nil(t, resp.RegionError)
 	builder.assertLens(0, 0, 1)
 	builder.assert([]kv{

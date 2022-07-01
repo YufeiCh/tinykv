@@ -93,3 +93,8 @@ region 调度器：
 ##### partA
 MVCC机制：从tinyScheduler获取TSO。使用 KvGet, KvScan来获取数据，根据 KvPrewrite 提交 prewrite请求。
 整体机制与pingcap的相关文档解释的差不多，这里需要实现的是 MvccTxn api。所有的相关修改都在 MvccTxn 中，当与某个 command 的修改都到位之后，就可以写入底层的存储
+
+##### partB
+实现 KvGet, KvPrewrite, KvCommit。
+KvGet：首先查看Lock中有没有小于当前 ts 的锁，如果有说明目前这个 key 被锁住了，那么就需要返回相应的锁信息，方便之后重试。另外，在这种情况下，tinykv也需要为这个 key 找打一个合适的version。
+KvPrewrite：将数据写入底层数据库，并且需要锁上这个key，需要检查没有另一个事务已经对这个key上锁，或者正在写同样的key。另外还需要检查是否已经有一个事务提交了这个Key，只有当所有的key都没有被锁上时，才是成功的prewrite。
