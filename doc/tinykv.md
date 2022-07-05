@@ -98,3 +98,12 @@ MVCC机制：从tinyScheduler获取TSO。使用 KvGet, KvScan来获取数据，�
 实现 KvGet, KvPrewrite, KvCommit。
 KvGet：首先查看Lock中有没有小于当前 ts 的锁，如果有说明目前这个 key 被锁住了，那么就需要返回相应的锁信息，方便之后重试。另外，在这种情况下，tinykv也需要为这个 key 找打一个合适的version。
 KvPrewrite：将数据写入底层数据库，并且需要锁上这个key，需要检查没有另一个事务已经对这个key上锁，或者正在写同样的key。另外还需要检查是否已经有一个事务提交了这个Key，只有当所有的key都没有被锁上时，才是成功的prewrite。
+
+##### partC
+实现KvScan, KvCheckTxnStatus, KvBatchRollBack, KvResolveLock
+KvScan：需要实现一个scanner作为迭代的抽象。当scan时，如果遇到错误可以将其记录下来，而不是整个scanning 直接 abort。这里读取的是快照，所以要以write里面的版本作为依据。
+以下是写事务时遇到冲突时调用的方法，每一个方法都会修改已存在锁的状态。
+KvCheckTxnStatus：检查超时的锁并移除，最后返回这个锁的状态。
+KvBatchRollback：检查 key 是否被当前的事务锁着，如果是就把锁去掉，删除相应的数据，并将回滚信息写入write列。
+KvResolveLock：检查一批上锁的 key，要么全部回滚要么全部commit。这里可以利用 KvBatchRollback 和 KvCommit的代码。
+时间戳包含物理部分与逻辑部分，物理部分是一个单调版本的物理时钟，当比较两个时间戳时，要比对物理与逻辑两个部分，当计算超时时，仅计算物理部分。
